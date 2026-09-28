@@ -209,24 +209,36 @@ async function assertReadable(cwd: string, file: string) {
   }
 }
 
+/*
+ * Both checks rewrite the file to /dev/null instead of running
+ * `qpdf --check`. Debian's qpdf build takes 15 seconds to check a
+ * 57-page scan that a rewrite reads in 20 ms (Homebrew's build checks it
+ * in 0.3 s), and the rewrite reaches the same verdict on damaged objects
+ * and streams.
+ */
+
 /**
- * Reads every object into a throwaway copy with stream data untouched.
- * That rejects broken cross-reference tables and unreadable objects in
- * milliseconds, where `qpdf --check` also decodes every image and takes
- * seconds on a large scan. Damage inside a stream still fails safely
- * later, when Ghostscript or qpdf rewrites the file.
+ * Reads every object, leaving stream data untouched. Warnings are fine
+ * here; damage inside a stream still fails safely later, when Ghostscript
+ * or qpdf rewrites the file.
  */
 async function isValidPdf(cwd: string, file: string) {
-  const result = await qpdf(cwd, ['--stream-data=preserve', file, 'readable.pdf'])
+  const result = await qpdf(cwd, ['--stream-data=preserve', file, '/dev/null'])
   return result.code !== null && result.code !== QPDF_ERROR
 }
 
 /**
- * The generated file gets the full check: any warning means a viewer
- * such as Acrobat may refuse it.
+ * Reads every object and decodes every compressed stream of the
+ * generated file. Any warning rejects it, since viewers such as Acrobat
+ * may refuse a file qpdf warns about.
  */
 async function isCleanPdf(cwd: string, file: string) {
-  const result = await qpdf(cwd, ['--check', file])
+  const result = await qpdf(cwd, [
+    '--decode-level=generalized',
+    '--stream-data=uncompress',
+    file,
+    '/dev/null',
+  ])
   return result.code === 0
 }
 
