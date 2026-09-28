@@ -1,0 +1,151 @@
+@layout({ title: 'Stats' })
+  <div class="stats">
+    <section class="hero">
+      <h1>Stats</h1>
+      <p>Every file made smaller since launch.</p>
+      <a class="back-link" href="{{ urlFor('home') }}">← Compress a file</a>
+    </section>
+
+    <dl class="kpis">
+      <div class="kpi">
+        <dt>Files compressed</dt>
+        <dd class="kpi-value">{{ format.count(stats.files) }}</dd>
+      </div>
+      <div class="kpi">
+        <dt>People</dt>
+        <dd class="kpi-value">{{ format.count(stats.people) }}</dd>
+        <dd class="kpi-note">Counted once per browser</dd>
+      </div>
+      <div class="kpi">
+        <dt>Data saved</dt>
+        <dd class="kpi-value">{{ format.bytes(stats.savedBytes) }}</dd>
+      </div>
+      <div class="kpi">
+        <dt>Average reduction</dt>
+        <dd class="kpi-value">{{ Math.round(reduction * 100) }}%</dd>
+        <dd class="kpi-note">Of all original bytes</dd>
+      </div>
+    </dl>
+
+    @if(stats.files === 0)
+      <section class="stats-card">
+        <p class="stats-empty">No files compressed yet. Charts appear here after the first one.</p>
+      </section>
+    @else
+      <section class="stats-card" aria-labelledby="daily-title">
+        <div class="step-header">
+          <h2 id="daily-title">Files per day</h2>
+          <p class="step-meta">Last {{ daily.points.length }} days, UTC</p>
+        </div>
+
+        <div
+          class="daily"
+          x-data="dailyChart({{ JSON.stringify(daily.points) }})"
+          tabindex="0"
+          role="group"
+          aria-label="Files per day. Use the left and right arrow keys to read each day."
+          @focus="enter()"
+          @blur="hide()"
+          @keydown.arrow-right.prevent="step(1)"
+          @keydown.arrow-left.prevent="step(-1)"
+        >
+          <div class="daily-plot">
+            <div class="daily-ticks" aria-hidden="true">
+              @each(tick in daily.ticks)
+                <span class="daily-tick" style="bottom: {{ (tick / daily.top) * 100 }}%">
+                  <span>{{ format.exact(tick) }}</span>
+                </span>
+              @end
+            </div>
+
+            <div class="daily-columns" aria-hidden="true" @pointerleave="hide()">
+              @each((point, index) in daily.points)
+                <div
+                  class="daily-slot"
+                  :class="{ 'is-active': active === {{ index }} }"
+                  @pointerenter="show({{ index }})"
+                >
+                  @if(point.files > 0)
+                    <span class="daily-bar" style="height: {{ (point.files / daily.top) * 100 }}%"></span>
+                  @end
+                </div>
+              @end
+            </div>
+
+            <div class="chart-tooltip" x-show="active !== null" x-cloak :style="tooltipStyle" aria-hidden="true">
+              <strong x-text="active !== null && describe(days[active])"></strong>
+              <span x-text="active !== null && days[active].label"></span>
+            </div>
+          </div>
+
+          <div class="daily-axis" aria-hidden="true">
+            <span>{{ daily.points[0].label }}</span>
+            <span>Today</span>
+          </div>
+
+          <p class="visually-hidden" aria-live="polite" x-text="active !== null ? `${days[active].label}: ${describe(days[active])}` : ''"></p>
+        </div>
+      </section>
+
+      <div class="stats-split">
+        <section class="stats-card" aria-labelledby="kinds-title">
+          <div class="step-header">
+            <h2 id="kinds-title">By file type</h2>
+          </div>
+          <table class="bar-table">
+            <thead>
+              <tr>
+                <th scope="col">Type</th>
+                <th scope="col" class="bar-column">Files</th>
+                <th scope="col" class="numeric">Saved</th>
+              </tr>
+            </thead>
+            <tbody>
+              @each(row in stats.kinds)
+                <tr>
+                  <th scope="row">{{ kindNames[row.kind] }}</th>
+                  <td>
+                    <span class="bar-cell">
+                      <span class="bar" style="--share: {{ row.files / maxKindFiles }}"></span>
+                      <span class="bar-value">{{ format.exact(row.files) }}</span>
+                    </span>
+                  </td>
+                  <td class="numeric">{{ format.bytes(row.savedBytes) }}</td>
+                </tr>
+              @end
+            </tbody>
+          </table>
+        </section>
+
+        <section class="stats-card" aria-labelledby="modes-title">
+          <div class="step-header">
+            <h2 id="modes-title">By mode</h2>
+          </div>
+          <table class="bar-table">
+            <thead>
+              <tr>
+                <th scope="col">Mode</th>
+                <th scope="col" class="bar-column">Files</th>
+              </tr>
+            </thead>
+            <tbody>
+              @each(row in stats.modes)
+                <tr>
+                  <th scope="row">{{ modeNames[row.mode] }}</th>
+                  <td>
+                    <span class="bar-cell">
+                      @if(row.files > 0)
+                        <span class="bar" style="--share: {{ row.files / maxModeFiles }}"></span>
+                      @end
+                      <span class="bar-value">{{ format.exact(row.files) }}</span>
+                    </span>
+                  </td>
+                </tr>
+              @end
+            </tbody>
+          </table>
+        </section>
+      </div>
+    @end
+  </div>
+@end

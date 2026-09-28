@@ -1,0 +1,261 @@
+@let(modes = [
+  {
+    value: 'lossless',
+    title: 'Lossless',
+    resolution: 'Unchanged',
+    pixels: 'Unchanged',
+    description: 'Rewrites how the file is stored. Nothing visible changes, but savings are usually small.',
+  },
+  {
+    value: 'balanced',
+    title: 'Balanced',
+    badge: 'Recommended',
+    resolution: '150 dpi',
+    pixels: `${imageSettings.balanced.maxSide} px`,
+    description: 'Good for reading on screen and sharing. Try this first.',
+  },
+  {
+    value: 'medium',
+    title: 'Medium',
+    resolution: '100 dpi',
+    pixels: `${imageSettings.medium.maxSide} px`,
+    description: 'Noticeably smaller. Photos and scanned text stay readable but softer.',
+  },
+  {
+    value: 'strong',
+    title: 'Strong',
+    resolution: '72 dpi',
+    pixels: `${imageSettings.strong.maxSide} px`,
+    description: 'The smallest file. Photos and scanned text can become blurry or hard to read.',
+  },
+])
+@let(defaultMode = pdfModes.includes('balanced') ? 'balanced' : (pdfModes[0] ?? ''))
+@let(maxMegabytes = Math.round(maxUploadBytes / 1024 / 1024))
+@let(missingPdfTool = tools.qpdf ? 'Ghostscript' : 'qpdf')
+@let(compressorOptions = {
+  maxBytes: maxUploadBytes,
+  mode: defaultMode,
+  modes,
+  pdfModes,
+  missingPdfTool,
+  fileKinds,
+  totals,
+})
+
+@layout()
+  <div
+    class="compressor"
+    x-data="compressor({{ JSON.stringify(compressorOptions) }})"
+    @dragenter.window="dragEnter($event)"
+    @dragleave.window="dragLeave($event)"
+    @dragover.window.prevent="$event.dataTransfer.dropEffect = busy ? 'none' : 'copy'"
+    @drop.window.prevent="drop($event)"
+  >
+    <section class="hero">
+      <h1>Compress a file</h1>
+      <p>Temporary copies are deleted after each compression.</p>
+      <a class="usage" href="{{ urlFor('stats') }}" x-show="totals.files > 0" x-cloak>
+        <strong x-text="formatCount(totals.files)"></strong>
+        <span x-text="totals.files === 1 ? 'file compressed' : 'files compressed'"></span>
+        <template x-if="totals.people > 0">
+          <span>by <strong x-text="formatCount(totals.people)"></strong> <span x-text="totals.people === 1 ? 'person' : 'people'"></span></span>
+        </template>
+      </a>
+    </section>
+
+    @if(!tools.qpdf || !tools.gs)
+      <div class="notice notice-error" role="alert">
+        <h2>Missing PDF tools</h2>
+        <p>
+          @if(!tools.qpdf)
+            qpdf is not installed, so PDFs cannot be compressed.
+          @else
+            Ghostscript is not installed, so PDFs can only use Lossless mode.
+          @end
+          Install both with Homebrew, then reload this page:
+        </p>
+        <div class="command">
+          <code>brew install qpdf ghostscript</code>
+          <button
+            type="button"
+            class="command-copy"
+            x-data="{ copied: false }"
+            @click="navigator.clipboard.writeText('brew install qpdf ghostscript').then(() => { copied = true; setTimeout(() => copied = false, 2000) })"
+            x-text="copied ? 'Copied' : 'Copy'"
+          >
+            Copy
+          </button>
+        </div>
+      </div>
+    @end
+
+    <form
+      class="workspace"
+      action="{{ urlFor('compress') }}"
+      method="POST"
+      enctype="multipart/form-data"
+      @submit.prevent="submit"
+    >
+      <div class="steps">
+        <section class="step" aria-labelledby="step-file">
+          <div class="step-header">
+            <h2 id="step-file"><span class="step-index" aria-hidden="true">01</span>File</h2>
+            <p class="step-meta">Up to {{ maxMegabytes }} MB</p>
+          </div>
+
+          <label
+            class="dropzone"
+            :class="{ 'is-dragging': dragging, 'has-file': file, 'is-locked': busy }"
+          >
+            <input
+              type="file"
+              name="file"
+              accept="{{ accept }}"
+              x-ref="input"
+              :disabled="busy"
+              @change="pick($event.target.files)"
+            />
+            <span class="dropzone-empty" x-show="!file">
+              <span class="dropzone-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5" /><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
+              </span>
+              <strong x-text="dragging ? 'Drop to add your file' : 'Drop a file here'">Drop a file here</strong>
+              <small>or <u>choose a file</u></small>
+              <small class="dropzone-types">PDF, JPG, PNG, WebP, Word or PowerPoint</small>
+            </span>
+            <span class="dropzone-file" x-show="file" x-cloak>
+              <span class="file-thumb" aria-hidden="true" x-text="kindLabel(kind)"></span>
+              <span class="file-details">
+                <strong x-text="file?.name"></strong>
+                <small x-text="file && formatBytes(file.size)"></small>
+              </span>
+              <span class="file-replace" aria-hidden="true">Replace</span>
+            </span>
+          </label>
+        </section>
+
+        <fieldset class="step modes" :disabled="busy">
+          <legend class="step-header">
+            <span class="step-title"><span class="step-index" aria-hidden="true">02</span>Compression</span>
+            <span class="step-meta" aria-hidden="true">Image resolution</span>
+          </legend>
+
+          <div class="mode-list">
+            @each(mode in modes)
+              <label
+                class="mode {{ pdfModes.includes(mode.value) ? '' : 'is-unavailable needs-tool' }}"
+                :class="{
+                  'is-selected': mode === '{{ mode.value }}',
+                  'is-unavailable': !canUse('{{ mode.value }}'),
+                  'needs-tool': !canUse('{{ mode.value }}') && kind === 'pdf',
+                }"
+              >
+                <input
+                  type="radio"
+                  name="mode"
+                  value="{{ mode.value }}"
+                  x-model="mode"
+                  {{ mode.value === defaultMode ? 'checked' : '' }}
+                  {{ pdfModes.includes(mode.value) ? '' : 'disabled' }}
+                  :disabled="!canUse('{{ mode.value }}')"
+                />
+                <span class="mode-title">
+                  {{ mode.title }}
+                  @if(mode.badge)
+                    <em>{{ mode.badge }}</em>
+                  @end
+                </span>
+                <span class="mode-resolution">
+                  <span class="visually-hidden" x-show="canUse('{{ mode.value }}')">Image resolution:</span>
+                  <span x-text="modeDetail('{{ mode.value }}')">{{ pdfModes.includes(mode.value) ? mode.resolution : `Needs ${missingPdfTool}` }}</span>
+                </span>
+                <span class="mode-description">{{ mode.description }}</span>
+              </label>
+            @end
+          </div>
+        </fieldset>
+
+        <div class="action">
+          <button type="submit" class="button" x-ref="submit" :disabled="!file || !mode || busy">
+            <span x-text="busy ? 'Compressing…' : 'Compress file'">Compress file</span>
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" x-show="!busy"><path d="M5 12h14m0 0-5.5-5.5M19 12l-5.5 5.5" /></svg>
+          </button>
+
+          <div class="action-status" aria-live="polite">
+            <div class="processing" x-show="busy" x-cloak>
+              <p class="visually-hidden">Compressing <span x-text="file?.name"></span>.</p>
+              <div class="progress-track" role="progressbar" aria-label="Compression in progress">
+                <span class="progress-indicator"></span>
+              </div>
+              <p class="processing-status">
+                Large files can take a minute.
+                <span class="elapsed" aria-hidden="true" x-text="formatElapsed(elapsed)"></span>
+              </p>
+            </div>
+
+            <div class="notice notice-error" role="alert" x-show="error" x-cloak>
+              <svg class="notice-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5m0 3.5v.01" /></svg>
+              <p x-text="error"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section class="result-step" aria-labelledby="step-result">
+        <div class="panel">
+          <div class="step-header">
+            <h2 id="step-result"><span class="step-index" aria-hidden="true">03</span>Result</h2>
+          </div>
+
+          <div class="outcome" aria-live="polite">
+            <p class="result-empty" x-show="!result">Your compressed file will appear here.</p>
+
+            <div class="result" x-show="result" x-cloak>
+              <template x-if="result">
+                <div class="result-body" :style="`--ratio: ${sizeRatio(result)}`">
+                  <p class="saving">
+                    <span class="saving-value" x-text="savedPercent(result)"></span>
+                    <span class="saving-label">smaller</span>
+                  </p>
+
+                  <dl class="sizes">
+                    <div class="size">
+                      <dt>Original</dt>
+                      <dd x-text="formatBytes(result.originalSize)"></dd>
+                      <span class="size-bar" aria-hidden="true"><span></span></span>
+                    </div>
+                    <div class="size size-output">
+                      <dt x-text="result.reduced ? 'Compressed' : 'Your download'"></dt>
+                      <dd x-text="formatBytes(result.outputSize)"></dd>
+                      <span class="size-bar" aria-hidden="true"><span></span></span>
+                    </div>
+                  </dl>
+
+                  <ul class="checks" x-show="result.reduced">
+                    <template x-for="check in resultChecks(result)" :key="check">
+                      <li x-text="check"></li>
+                    </template>
+                  </ul>
+
+                  <p class="result-note" x-show="result.pagesResized > 0">
+                    <span x-text="result.pagesResized === 1 ? '1 oversized scanned page was' : `${result.pagesResized} oversized scanned pages were`"></span>
+                    scaled to A4 size so their images could be reduced.
+                  </p>
+                  <p class="result-note" x-show="!result.reduced">
+                    This mode did not make the file smaller, so the download is your original file.
+                    <span x-show="mode !== 'strong'">A stronger mode may help.</span>
+                  </p>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <a class="button" x-ref="download" x-show="result" x-cloak :href="result?.url" :download="result?.filename">
+            <span x-text="result && `Download ${kindLabel(result.kind)}`">Download</span>
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v14m0 0-5.5-5.5M12 18l5.5-5.5" /><path d="M5 21h14" /></svg>
+          </a>
+        </div>
+      </section>
+    </form>
+  </div>
+@end
