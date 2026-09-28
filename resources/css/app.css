@@ -140,6 +140,23 @@ main {
   }
 }
 
+.site-footer {
+  padding: 0 var(--gutter) 40px;
+  text-align: center;
+  font-size: var(--text-small);
+  color: var(--gray-6);
+}
+.site-footer a {
+  color: var(--gray-10);
+  text-decoration: underline;
+  text-decoration-color: var(--gray-4);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.2s;
+}
+.site-footer a:hover {
+  text-decoration-color: currentColor;
+}
+
 .theme-toggle {
   position: absolute;
   top: 20px;
