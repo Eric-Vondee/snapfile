@@ -24,9 +24,9 @@ const bodyParserConfig = defineConfig({
     convertEmptyStringsToNull: true,
     trimWhitespaces: true,
     processManually: ['/compress'],
-    // Just above the 50 MB per-file limit in the compression controller, so
+    // Just above the 100 MB per-file limit in the compression controller, so
     // an oversized file fails that check (with a clear message) first
-    limit: '51mb',
+    limit: '101mb',
     types: ['multipart/form-data'],
   },
 })

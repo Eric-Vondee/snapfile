@@ -1,5 +1,6 @@
 import '@fontsource-variable/inter/opsz.css'
 import Alpine from 'alpinejs'
+import { zipSync } from 'fflate'
 
 Alpine.data('alert', () => ({
   isVisible: false,
@@ -99,15 +100,12 @@ Alpine.data('dailyChart', (days) => ({
 
 /**
  * Messages for failures where the server could not send a JSON error,
- * such as the body parser rejecting an oversized request.
+ * such as a proxy rejecting an oversized request.
  */
 const STATUS_MESSAGES = {
   403: 'The request was rejected. Reload the page and try again.',
-  413: 'The file is larger than 50 MB.',
+  413: 'The file is too large to upload.',
 }
-
-const UNSUPPORTED_MESSAGE =
-  'This file type is not supported. Choose a PDF, JPG, PNG, WebP, Word (.docx) or PowerPoint (.pptx) file.'
 
 const KIND_LABELS = {
   pdf: 'PDF',
@@ -118,68 +116,200 @@ const KIND_LABELS = {
   pptx: 'PPTX',
 }
 
+let nextItemId = 0
+
 Alpine.data(
   'compressor',
-  ({ maxBytes, mode, modes, pdfModes, missingPdfTool, fileKinds, totals }) => ({
-    file: null,
+  ({ maxBytes, maxFiles, mode, modes, pdfModes, missingPdfTool, fileKinds, totals }) => ({
+    /**
+     * The chosen files. Status goes from ready to working, then to done
+     * (with a result) or failed (with an error).
+     */
+    items: [],
+    maxFiles,
     totals,
     mode,
     busy: false,
+    zipping: false,
     dragging: false,
     dragDepth: 0,
     elapsed: 0,
     error: null,
-    result: null,
 
     init() {
       this.$watch('mode', () => this.reset())
     },
 
     /**
-     * Kind of the chosen file, judged from its name. The server checks the
-     * contents. Before a file is chosen the modes describe PDFs.
+     * Kinds of the chosen files, judged from their names. The server checks
+     * the contents. Before a file is chosen the modes describe PDFs.
      */
-    get kind() {
-      return (this.file && kindOf(this.file, fileKinds)) ?? 'pdf'
+    get kinds() {
+      const kinds = new Set(this.items.map((item) => item.kind))
+      return kinds.size > 0 ? [...kinds] : ['pdf']
+    },
+
+    get isBatch() {
+      return this.items.length > 1
+    },
+
+    /**
+     * True once the files have been sent. Adding files after that starts
+     * a new batch, so the results always match the files listed.
+     */
+    get started() {
+      return this.items.some((item) => item.status !== 'ready')
+    },
+
+    /**
+     * A single file's result is shown in full; a batch gets a summary and
+     * a row per file instead.
+     */
+    get result() {
+      return this.isBatch ? null : (this.items[0]?.result ?? null)
+    },
+
+    get showBatch() {
+      return this.isBatch && this.started
+    },
+
+    get done() {
+      return this.items.filter((item) => item.result)
+    },
+
+    get finished() {
+      return this.items.filter((item) => item.status === 'done' || item.status === 'failed').length
+    },
+
+    get batchSizes() {
+      return this.done.reduce(
+        (sizes, { result }) => ({
+          originalSize: sizes.originalSize + result.originalSize,
+          outputSize: sizes.outputSize + result.outputSize,
+        }),
+        { originalSize: 0, outputSize: 0 }
+      )
+    },
+
+    /**
+     * Problems with the chosen files, or why a single file failed. In a
+     * batch each file shows its own failure in the result list.
+     */
+    get notice() {
+      return this.error ?? (this.isBatch ? null : (this.items[0]?.error ?? null))
+    },
+
+    get submitLabel() {
+      return this.isBatch ? `Compress ${this.items.length} files` : 'Compress file'
+    },
+
+    /**
+     * The chosen kind that rules a mode out, if any. A missing PDF tool is
+     * named first, since installing it is the fix.
+     */
+    blocker(value) {
+      if (this.kinds.includes('pdf') && !pdfModes.includes(value)) return 'pdf'
+      // Lossless keeps every pixel, which JPG and WebP cannot do when re-encoded
+      if (value === 'lossless') return this.kinds.find((kind) => kind === 'jpeg' || kind === 'webp')
+      return undefined
     },
 
     canUse(value) {
-      if (!value) return false
-      if (this.kind === 'pdf') return pdfModes.includes(value)
-      // Lossless keeps every pixel, which JPG and WebP cannot do when re-encoded
-      return value !== 'lossless' || !['jpeg', 'webp'].includes(this.kind)
+      return Boolean(value) && !this.blocker(value)
+    },
+
+    needsTool(value) {
+      return this.blocker(value) === 'pdf'
     },
 
     modeDetail(value) {
       const { resolution, pixels } = modes.find((option) => option.value === value)
-      if (this.canUse(value)) return this.kind === 'pdf' ? resolution : pixels
-      return this.kind === 'pdf' ? `Needs ${missingPdfTool}` : `Not for ${KIND_LABELS[this.kind]}`
+      const blocker = this.blocker(value)
+      if (blocker) {
+        return blocker === 'pdf' ? `Needs ${missingPdfTool}` : `Not for ${KIND_LABELS[blocker]}`
+      }
+
+      // PDF images are measured in dpi; photos, and those inside documents, in pixels
+      const pdfs = this.kinds.includes('pdf')
+      const others = this.kinds.some((kind) => kind !== 'pdf')
+      if (pdfs && others && resolution !== pixels) return `${resolution} · ${pixels}`
+      return pdfs ? resolution : pixels
     },
 
     kindLabel(kind) {
       return KIND_LABELS[kind] ?? ''
     },
 
-    pick(files) {
+    /**
+     * Adds files to the list, leaving out any that cannot be compressed
+     * and saying why.
+     */
+    add(fileList) {
+      const files = [...(fileList ?? [])]
+      if (this.busy || files.length === 0) return
+      if (this.started) this.clear()
       this.reset()
-      const file = files?.[0] ?? null
-      if (file && (file.size > maxBytes || !kindOf(file, fileKinds))) {
-        this.file = null
-        this.$refs.input.value = ''
-        this.error = file.size > maxBytes ? STATUS_MESSAGES[413] : UNSUPPORTED_MESSAGE
-        return
-      }
-      this.file = file
 
-      // A mode picked for another kind of file may not apply to this one
+      const skipped = { unsupported: [], tooLarge: [], leftOut: 0 }
+      for (const file of files) {
+        const kind = kindOf(file, fileKinds)
+        if (!kind) {
+          skipped.unsupported.push(file.name)
+          continue
+        }
+        if (file.size > maxBytes) {
+          skipped.tooLarge.push(file.name)
+          continue
+        }
+        // The same file dropped twice is only listed once
+        if (this.items.some((item) => sameFile(item.file, file))) continue
+        if (this.items.length >= maxFiles) {
+          skipped.leftOut++
+          continue
+        }
+        this.items.push({
+          id: nextItemId++,
+          file,
+          kind,
+          status: 'ready',
+          result: null,
+          error: null,
+        })
+      }
+      this.error = skippedMessage(skipped, { maxBytes, maxFiles })
+
+      // A mode picked for another kind of file may not apply to these
       if (!this.canUse(this.mode)) {
         const fallbacks = ['balanced', ...modes.map((option) => option.value)]
         this.mode = fallbacks.find((value) => this.canUse(value)) ?? ''
       }
     },
 
+    remove(item) {
+      if (this.busy) return
+      // Looked up first: $root is found from the clicked button, whose row
+      // is detached once the list updates
+      const root = this.$root
+      const index = this.items.findIndex((other) => other.id === item.id)
+      revoke(item)
+      this.items.splice(index, 1)
+      this.error = null
+
+      // The removed button had focus; hand it to the row that took its place
+      this.$nextTick(() => {
+        const buttons = root.querySelectorAll('.file-remove')
+        const next = buttons[Math.min(index, buttons.length - 1)] ?? root.querySelector('input')
+        next.focus()
+      })
+    },
+
+    clear() {
+      this.items.forEach(revoke)
+      this.items = []
+    },
+
     /**
-     * The whole window accepts a dropped file, so dragging a PDF anywhere
+     * The whole window accepts dropped files, so dragging a PDF anywhere
      * highlights the drop zone. A counter is needed because every child
      * element fires its own dragenter and dragleave.
      */
@@ -199,17 +329,24 @@ Alpine.data(
       this.dragDepth = 0
       this.dragging = false
       if (this.busy || !event.dataTransfer?.files.length) return
-      this.pick(event.dataTransfer.files)
+      this.add(event.dataTransfer.files)
     },
 
     reset() {
       this.error = null
-      if (this.result) URL.revokeObjectURL(this.result.url)
-      this.result = null
+      for (const item of this.items) {
+        revoke(item)
+        Object.assign(item, { status: 'ready', result: null, error: null })
+      }
     },
 
+    /**
+     * Each file is its own request, so results show up as they finish and
+     * one bad file does not fail the rest. The server decides how many are
+     * compressed at the same time.
+     */
     async submit() {
-      if (!this.file || !this.mode || this.busy) return
+      if (this.items.length === 0 || !this.mode || this.busy) return
       this.reset()
       this.busy = true
       const startedAt = Date.now()
@@ -218,12 +355,22 @@ Alpine.data(
         this.elapsed = Math.floor((Date.now() - startedAt) / 1000)
       }, 1000)
 
+      const action = this.$root.querySelector('form').action
+      await Promise.all(this.items.map((item) => this.compress(item, action)))
+
+      clearInterval(timer)
+      this.busy = false
+      this.restoreFocus()
+    },
+
+    async compress(item, action) {
+      item.status = 'working'
       const body = new FormData()
       body.append('mode', this.mode)
-      body.append('file', this.file)
+      body.append('file', item.file)
 
       try {
-        const response = await fetch(this.$root.querySelector('form').action, {
+        const response = await fetch(action, {
           method: 'POST',
           body,
           headers: {
@@ -234,41 +381,54 @@ Alpine.data(
         })
 
         if (!response.ok) {
-          this.error = await errorMessage(response)
-          return
-        }
-        // Shield answers a failed CSRF check with a redirect to the page
-        if (response.redirected || !response.headers.get('X-File-Kind')) {
-          this.error = 'The page expired. Reload it and try again.'
-          return
-        }
-
-        const blob = await response.blob()
-        this.result = {
-          url: URL.createObjectURL(blob),
-          filename: downloadName(response) ?? this.file.name,
-          kind: response.headers.get('X-File-Kind'),
-          originalSize: Number(response.headers.get('X-Original-Size')),
-          outputSize: Number(response.headers.get('X-Output-Size')),
-          reduced: response.headers.get('X-Reduced') === 'true',
-          pagesResized: Number(response.headers.get('X-Pages-Resized')),
-          pageCount: Number(response.headers.get('X-Page-Count')),
-          imagesReduced: Number(response.headers.get('X-Images-Reduced')),
-          width: Number(response.headers.get('X-Image-Width')),
-          height: Number(response.headers.get('X-Image-Height')),
-        }
-
-        // Present when the compression was counted
-        const files = Number(response.headers.get('X-Total-Files'))
-        if (files > 0) {
-          this.totals = { files, people: Number(response.headers.get('X-Total-People')) }
+          item.error = await errorMessage(response)
+        } else if (response.redirected || !response.headers.get('X-File-Kind')) {
+          // Shield answers a failed CSRF check with a redirect to the page
+          item.error = 'The page expired. Reload it and try again.'
+        } else {
+          item.result = await readResult(response, item.file.name)
+          this.updateTotals(response)
         }
       } catch {
-        this.error = 'Could not reach the compressor. Is the server still running?'
+        item.error = 'Could not reach the compressor. Is the server still running?'
+      }
+      item.status = item.result ? 'done' : 'failed'
+    },
+
+    /**
+     * The headers are present when the compression was counted. Responses
+     * in a batch can arrive out of order, so the highest count wins.
+     */
+    updateTotals(response) {
+      const files = Number(response.headers.get('X-Total-Files'))
+      if (files > this.totals.files) {
+        this.totals = { files, people: Number(response.headers.get('X-Total-People')) }
+      }
+    },
+
+    /**
+     * Packs every compressed file of a batch into one download. The files
+     * are already compressed, so they are stored as they are.
+     */
+    async downloadAll() {
+      if (this.zipping) return
+      this.zipping = true
+      try {
+        const names = new Set()
+        const files = {}
+        for (const { result } of this.done) {
+          const bytes = new Uint8Array(await result.blob.arrayBuffer())
+          files[uniqueName(result.filename, names)] = [bytes, { level: 0 }]
+        }
+        const url = URL.createObjectURL(new Blob([zipSync(files)], { type: 'application/zip' }))
+        Object.assign(document.createElement('a'), {
+          href: url,
+          download: 'compressed-files.zip',
+        }).click()
+        // Kept until the browser has had time to start the download
+        setTimeout(() => URL.revokeObjectURL(url), 10_000)
       } finally {
-        clearInterval(timer)
-        this.busy = false
-        this.restoreFocus()
+        this.zipping = false
       }
     },
 
@@ -284,10 +444,20 @@ Alpine.data(
           const active = document.activeElement
           if (active && active !== document.body && active !== this.$refs.submit) return
 
-          const next = this.result ? this.$refs.download : this.$refs.submit
+          let next = this.$refs.submit
+          if (this.result) next = this.$refs.download
+          else if (this.isBatch && this.done.length > 1) next = this.$refs.downloadAll
           next.focus()
         })
       )
+    },
+
+    itemStatus({ file, status, result, error }) {
+      if (status === 'working') return 'Compressing…'
+      if (status === 'failed') return error
+      if (!result) return formatBytes(file.size)
+      if (!result.reduced) return `${formatBytes(result.outputSize)} · Not smaller, original kept`
+      return `${formatBytes(result.originalSize)} → ${formatBytes(result.outputSize)}`
     },
 
     formatBytes,
@@ -333,6 +503,29 @@ Alpine.data(
   })
 )
 
+async function readResult(response, fallbackName) {
+  const blob = await response.blob()
+  const header = (name) => response.headers.get(name)
+  return {
+    blob,
+    url: URL.createObjectURL(blob),
+    filename: downloadName(response) ?? fallbackName,
+    kind: header('X-File-Kind'),
+    originalSize: Number(header('X-Original-Size')),
+    outputSize: Number(header('X-Output-Size')),
+    reduced: header('X-Reduced') === 'true',
+    pagesResized: Number(header('X-Pages-Resized')),
+    pageCount: Number(header('X-Page-Count')),
+    imagesReduced: Number(header('X-Images-Reduced')),
+    width: Number(header('X-Image-Width')),
+    height: Number(header('X-Image-Height')),
+  }
+}
+
+function revoke(item) {
+  if (item.result) URL.revokeObjectURL(item.result.url)
+}
+
 async function errorMessage(response) {
   if (response.headers.get('Content-Type')?.includes('application/json')) {
     const data = await response.json().catch(() => null)
@@ -367,6 +560,52 @@ function kindOf(file, fileKinds) {
     kinds.find(([, { extensions }]) => extensions.includes(extension)) ??
     kinds.find(([, { contentType }]) => contentType === file.type)
   return match?.[0] ?? null
+}
+
+function sameFile(a, b) {
+  return a.name === b.name && a.size === b.size && a.lastModified === b.lastModified
+}
+
+/**
+ * Says which chosen files were left out and why, or null when none were.
+ */
+function skippedMessage({ unsupported, tooLarge, leftOut }, { maxBytes, maxFiles }) {
+  const problems = []
+  if (unsupported.length > 0) {
+    const verb =
+      unsupported.length === 1 ? 'is not a supported file type' : 'are not supported file types'
+    problems.push(
+      `${listNames(unsupported)} ${verb}. Choose PDF, JPG, PNG, WebP, Word (.docx) or PowerPoint (.pptx) files.`
+    )
+  }
+  if (tooLarge.length > 0) {
+    const verb = tooLarge.length === 1 ? 'is' : 'are'
+    problems.push(
+      `${listNames(tooLarge)} ${verb} larger than ${Math.round(maxBytes / 1024 / 1024)} MB.`
+    )
+  }
+  if (leftOut > 0) {
+    problems.push(`Up to ${maxFiles} files can be compressed at a time.`)
+  }
+  return problems.join(' ') || null
+}
+
+function listNames(names) {
+  const quoted = names.map((name) => `“${name}”`)
+  return quoted.length === 1 ? quoted[0] : `${quoted.slice(0, -1).join(', ')} and ${quoted.at(-1)}`
+}
+
+/**
+ * Two files can compress to the same name, and file systems that ignore
+ * case would still overwrite one with the other when unpacking.
+ */
+function uniqueName(name, taken) {
+  let candidate = name
+  for (let copy = 2; taken.has(candidate.toLowerCase()); copy++) {
+    candidate = name.replace(/(\.[^.]*)?$/, ` (${copy})$1`)
+  }
+  taken.add(candidate.toLowerCase())
+  return candidate
 }
 
 function hasFiles(event) {

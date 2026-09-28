@@ -285,8 +285,8 @@ test.group('Compress', (group) => {
       response.assertBody({ error })
     })
 
-  test('rejects files over 50 MB', async ({ client }) => {
-    const huge = Buffer.alloc(50 * 1024 * 1024 + 1)
+  test('rejects files over 100 MB', async ({ client }) => {
+    const huge = Buffer.alloc(100 * 1024 * 1024 + 1)
     huge.write('%PDF-1.4\n')
 
     const response = await client
@@ -296,7 +296,33 @@ test.group('Compress', (group) => {
       .file('file', huge, { filename: 'huge.pdf' })
 
     response.assertStatus(413)
-    response.assertBody({ error: 'The file is larger than 50 MB.' })
+    response.assertBody({ error: 'The file is larger than 100 MB.' })
+  })
+
+  test('compresses a batch of files sent at the same time', async ({ client, assert }) => {
+    // The page sends each file of a batch as its own request
+    const batch = ['text.pdf', 'scanned.pdf', 'oversized-scan.pdf', 'text.pdf', 'optimized.pdf']
+    const responses = await Promise.all(
+      batch.map((file) =>
+        client
+          .post('/compress')
+          .withCsrfToken()
+          .field('mode', 'balanced')
+          .file('file', fixture(file))
+      )
+    )
+
+    for (const [index, response] of responses.entries()) {
+      response.assertStatus(200)
+      assert.equal(Number(response.header('content-length')), response.body().length)
+      const output = join(dir, `out-batch-${index}.pdf`)
+      await writeFile(output, response.body())
+      assert.equal(await pageCount(output), await pageCount(fixture(batch[index])))
+    }
+    assert.deepEqual(
+      responses.map((response) => response.header('x-reduced')),
+      ['true', 'true', 'true', 'true', 'false']
+    )
   })
 
   test('rejects an unknown mode', async ({ client }) => {

@@ -296,10 +296,6 @@ main {
   outline: 2px solid var(--gray-12);
   outline-offset: 2px;
 }
-.dropzone.is-locked,
-.dropzone.is-locked input {
-  cursor: default;
-}
 
 .dropzone-empty {
   display: grid;
@@ -357,49 +353,86 @@ main {
   text-underline-offset: 3px;
 }
 
-.dropzone.has-file {
+/* Once files are chosen, the drop zone shrinks to a row below them */
+.dropzone.is-compact {
   place-items: stretch;
   min-height: 0;
-  padding: 16px 16px 16px 18px;
+  margin-top: 10px;
+  padding: 12px 16px;
   text-align: left;
-  border-style: solid;
-  border-color: var(--gray-3);
 }
-.dropzone.has-file:hover {
-  border-color: var(--gray-5);
-}
-.dropzone.has-file.is-dragging {
-  border-color: var(--gray-12);
-}
-.dropzone-file {
+.dropzone-more {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+}
+.dropzone-more .dropzone-icon {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+}
+.dropzone-more .dropzone-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.dropzone-more strong {
+  font-size: var(--text-small);
+  font-weight: 600;
+  color: var(--gray-12);
+}
+.dropzone-more small {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+  color: var(--gray-6);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Chosen files, and the per-file results of a batch */
+.file-list,
+.batch-list {
+  list-style: none;
+  border: 1px solid var(--gray-3);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.file-row,
+.batch-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   min-width: 0;
+  padding: 12px 12px 12px 16px;
+}
+.file-row + .file-row,
+.batch-item + .batch-item {
+  border-top: 1px solid var(--gray-3);
 }
 .file-thumb {
   flex: none;
   display: grid;
   place-items: end center;
-  width: 40px;
-  height: 50px;
-  padding-bottom: 8px;
-  border-radius: 5px;
+  width: 32px;
+  height: 40px;
+  padding-bottom: 6px;
+  border-radius: 4px;
   background: var(--gray-12);
   color: var(--surface);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 8.5px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   clip-path: polygon(0 0, 66% 0, 100% 26%, 100% 100%, 0 100%);
 }
-.file-details {
+.file-details,
+.batch-details {
   display: grid;
   flex: 1;
   min-width: 0;
 }
-.file-details strong {
+.file-details strong,
+.batch-details strong {
   overflow: hidden;
   font-weight: 600;
   color: var(--gray-12);
@@ -411,24 +444,68 @@ main {
   font-size: var(--text-mono);
   color: var(--gray-6);
 }
-.file-replace {
-  flex: none;
-  padding: 6px 14px;
-  border: 1px solid var(--gray-3);
-  border-radius: 999px;
+.batch-details strong {
+  font-size: var(--text-small);
+}
+.batch-details small {
   font-size: var(--text-tiny);
+  color: var(--gray-7);
+  text-wrap: pretty;
+}
+.batch-item.is-failed small {
+  color: var(--red-text);
+}
+.batch-saving {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
   font-weight: 500;
+  color: var(--gray-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.icon-button {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--gray-3);
+  border-radius: 50%;
+  background: var(--surface);
   color: var(--gray-8);
+  cursor: pointer;
   transition:
     border-color 0.2s,
     color 0.2s;
 }
-.dropzone.has-file:hover .file-replace {
+.icon-button:hover {
   border-color: var(--gray-12);
   color: var(--gray-12);
 }
-.dropzone.is-locked .file-replace {
-  visibility: hidden;
+.icon-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.file-remove:not(:hover, :focus-visible) {
+  border-color: transparent;
+  color: var(--gray-6);
+}
+
+.spinner {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 8px;
+  border: 2px solid var(--gray-3);
+  border-top-color: var(--gray-12);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 
 /* Modes */
@@ -598,6 +675,10 @@ main {
 .result-empty {
   font-size: var(--text-small);
   color: var(--gray-6);
+}
+.batch {
+  display: grid;
+  gap: 24px;
 }
 
 .processing {
@@ -1123,6 +1204,12 @@ a.button:hover .button-icon {
   }
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
 @keyframes compression-progress-reduced {
   0%,
   100% {
@@ -1151,6 +1238,9 @@ a.button:hover .button-icon {
     animation: compression-progress-reduced 1.8s ease-in-out infinite;
     transform: none;
     will-change: opacity;
+  }
+  .spinner {
+    animation: compression-progress-reduced 1.8s ease-in-out infinite;
   }
 }
 

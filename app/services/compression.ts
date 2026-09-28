@@ -2,7 +2,14 @@ export const MODES = ['lossless', 'balanced', 'medium', 'strong'] as const
 export type CompressionMode = (typeof MODES)[number]
 export type LossyMode = Exclude<CompressionMode, 'lossless'>
 
-export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+/**
+ * Files the page accepts at once. Each is sent as its own request, so
+ * the server only ever sees single files; the job queue decides how many
+ * are compressed at the same time.
+ */
+export const MAX_BATCH_FILES = 5
 
 /**
  * Name of the uploaded file inside each request's work directory. Tools
@@ -50,4 +57,8 @@ export interface CompressionResult {
    */
   width?: number
   height?: number
+  /**
+   * Milliseconds per processing step, for the log only.
+   */
+  steps?: Record<string, number>
 }

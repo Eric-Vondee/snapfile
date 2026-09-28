@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -10,11 +10,13 @@ import {
 	CompressionRejectedError,
 	type CompressionResult,
 	INPUT_FILE,
+	MAX_BATCH_FILES,
 	MAX_UPLOAD_BYTES,
 	MODES,
 } from "#services/compression";
 import { detectKind, FILE_KINDS, type FileKind } from "#services/file_kinds";
 import { compressImage, IMAGE_SETTINGS } from "#services/image_compressor";
+import { runQueued } from "#services/job_queue";
 import { compressOffice } from "#services/office_compressor";
 import { compressPdf, isPdfModeAvailable } from "#services/pdf_compressor";
 import { detectTools, ToolTimeoutError } from "#services/pdf_tools";
@@ -44,6 +46,7 @@ export default class CompressionController {
 			imageSettings: IMAGE_SETTINGS,
 			accept,
 			maxUploadBytes: MAX_UPLOAD_BYTES,
+			maxBatchFiles: MAX_BATCH_FILES,
 			// Install commands are for whoever runs the server, not its visitors
 			showSetupHelp: !app.inProduction,
 		});
@@ -56,10 +59,11 @@ export default class CompressionController {
 	 */
 	async store({ request, response, logger }: HttpContext) {
 		const workDir = await mkdtemp(join(tmpdir(), "compress-pdf-"));
-		// Where the time goes, in milliseconds: receiving the upload,
-		// compressing, and recording usage stats
+		// Where the time goes, in milliseconds: receiving the upload, waiting
+		// for a free slot in the job queue, compressing, and recording usage
+		// stats
 		const startedAt = performance.now();
-		const timings = { uploadMs: 0, processMs: 0, statsMs: 0 };
+		const timings = { uploadMs: 0, waitMs: 0, processMs: 0, statsMs: 0 };
 		const since = (from: number) => Math.round(performance.now() - from);
 
 		try {
@@ -89,17 +93,24 @@ export default class CompressionController {
 			if (!upload.isValid) {
 				const tooLarge = upload.errors.some((error) => error.type === "size");
 				throw tooLarge
-					? new CompressionRejectedError("The file is larger than 50 MB.", 413)
+					? new CompressionRejectedError(
+							`The file is larger than ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`,
+							413,
+						)
 					: new CompressionRejectedError(
 							"The upload could not be read. Try again.",
 						);
 			}
 
-			const processStartedAt = performance.now();
-			const kind = await detectKind(join(workDir, INPUT_FILE));
-			const result = await compress(workDir, kind, mode);
-			const body = await readFile(result.outputPath);
-			timings.processMs = since(processStartedAt);
+			const queuedAt = performance.now();
+			const { kind, result } = await runQueued(async () => {
+				const processStartedAt = performance.now();
+				timings.waitMs = since(queuedAt);
+				const kind = await detectKind(join(workDir, INPUT_FILE));
+				const result = await compress(workDir, kind, mode);
+				timings.processMs = since(processStartedAt);
+				return { kind, result };
+			});
 
 			response
 				.header("Content-Type", FILE_KINDS[kind].contentType)
@@ -150,7 +161,14 @@ export default class CompressionController {
 				"compressed file",
 			);
 
-			return response.send(body);
+			// Streamed rather than read into memory, since a batch of large
+			// files would otherwise hold every download in memory at once.
+			// The open handle keeps the file readable after its directory is
+			// removed below (on macOS and Linux).
+			const output = await open(result.outputPath);
+			const { size } = await output.stat();
+			response.header("Content-Length", String(size));
+			return response.stream(output.createReadStream());
 		} catch (error) {
 			if (error instanceof CompressionRejectedError) {
 				return response.status(error.status).json({ error: error.message });
@@ -167,7 +185,7 @@ export default class CompressionController {
 				error: "Compression failed for this file. Try a different mode.",
 			});
 		} finally {
-			// The response body is already in memory, so the upload and
+			// The download reads from an open handle, so the upload and
 			// every intermediate file can be removed now
 			await rm(workDir, { recursive: true, force: true });
 		}

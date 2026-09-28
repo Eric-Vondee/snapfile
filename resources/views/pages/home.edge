@@ -34,6 +34,7 @@
 @let(missingPdfTool = tools.qpdf ? 'Ghostscript' : 'qpdf')
 @let(compressorOptions = {
   maxBytes: maxUploadBytes,
+  maxFiles: maxBatchFiles,
   mode: defaultMode,
   modes,
   pdfModes,
@@ -52,7 +53,7 @@
     @drop.window.prevent="drop($event)"
   >
     <section class="hero">
-      <h1>Compress a file</h1>
+      <h1>Compress files</h1>
       <p>Temporary copies are deleted after each compression.</p>
       <a class="usage" href="{{ urlFor('stats') }}" x-show="totals.files > 0" x-cloak>
         <strong x-text="formatCount(totals.files)"></strong>
@@ -111,37 +112,59 @@
       <div class="steps">
         <section class="step" aria-labelledby="step-file">
           <div class="step-header">
-            <h2 id="step-file"><span class="step-index" aria-hidden="true">01</span>File</h2>
-            <p class="step-meta">Up to {{ maxMegabytes }} MB</p>
+            <h2 id="step-file"><span class="step-index" aria-hidden="true">01</span>Files</h2>
+            <p class="step-meta">Up to {{ maxBatchFiles }} files, {{ maxMegabytes }} MB each</p>
           </div>
+
+          <ul class="file-list" x-show="items.length" x-cloak>
+            <template x-for="item in items" :key="item.id">
+              <li class="file-row">
+                <span class="file-thumb" aria-hidden="true" x-text="kindLabel(item.kind)"></span>
+                <span class="file-details">
+                  <strong x-text="item.file.name"></strong>
+                  <small x-text="formatBytes(item.file.size)"></small>
+                </span>
+                <button
+                  type="button"
+                  class="icon-button file-remove"
+                  x-show="!busy"
+                  @click="remove(item)"
+                  :aria-label="`Remove ${item.file.name}`"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg>
+                </button>
+              </li>
+            </template>
+          </ul>
 
           <label
             class="dropzone"
-            :class="{ 'is-dragging': dragging, 'has-file': file, 'is-locked': busy }"
+            :class="{ 'is-dragging': dragging, 'is-compact': items.length }"
+            x-show="!busy && (items.length < maxFiles || started)"
           >
             <input
               type="file"
               name="file"
+              multiple
               accept="{{ accept }}"
               x-ref="input"
               :disabled="busy"
-              @change="pick($event.target.files)"
+              @change="add($event.target.files); $event.target.value = ''"
             />
-            <span class="dropzone-empty" x-show="!file">
+            <span class="dropzone-empty" x-show="!items.length">
               <span class="dropzone-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5" /><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
               </span>
-              <strong x-text="dragging ? 'Drop to add your file' : 'Drop a file here'">Drop a file here</strong>
-              <small>or <u>choose a file</u></small>
+              <strong x-text="dragging ? 'Drop to add your files' : 'Drop files here'">Drop files here</strong>
+              <small>or <u>choose files</u></small>
               <small class="dropzone-types">PDF, JPG, PNG, WebP, Word or PowerPoint</small>
             </span>
-            <span class="dropzone-file" x-show="file" x-cloak>
-              <span class="file-thumb" aria-hidden="true" x-text="kindLabel(kind)"></span>
-              <span class="file-details">
-                <strong x-text="file?.name"></strong>
-                <small x-text="file && formatBytes(file.size)"></small>
+            <span class="dropzone-more" x-show="items.length" x-cloak>
+              <span class="dropzone-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
               </span>
-              <span class="file-replace" aria-hidden="true">Replace</span>
+              <strong x-text="started ? 'Choose new files' : dragging ? 'Drop to add' : 'Add more files'"></strong>
+              <small x-show="!started" x-text="`${items.length} of ${maxFiles}`"></small>
             </span>
           </label>
         </section>
@@ -159,7 +182,7 @@
                 :class="{
                   'is-selected': mode === '{{ mode.value }}',
                   'is-unavailable': !canUse('{{ mode.value }}'),
-                  'needs-tool': !canUse('{{ mode.value }}') && kind === 'pdf',
+                  'needs-tool': needsTool('{{ mode.value }}'),
                 }"
               >
                 <input
@@ -188,14 +211,14 @@
         </fieldset>
 
         <div class="action">
-          <button type="submit" class="button" x-ref="submit" :disabled="!file || !mode || busy">
-            <span x-text="busy ? 'Compressing…' : 'Compress file'">Compress file</span>
+          <button type="submit" class="button" x-ref="submit" :disabled="!items.length || !mode || busy">
+            <span x-text="busy ? 'Compressing…' : submitLabel">Compress file</span>
             <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" x-show="!busy"><path d="M5 12h14m0 0-5.5-5.5M19 12l-5.5 5.5" /></svg>
           </button>
 
           <div class="action-status" aria-live="polite">
             <div class="processing" x-show="busy" x-cloak>
-              <p class="visually-hidden">Compressing <span x-text="file?.name"></span>.</p>
+              <p class="visually-hidden" x-text="`Compressing ${isBatch ? `${items.length} files` : items[0]?.file.name}.`"></p>
               <div class="progress-track" role="progressbar" aria-label="Compression in progress">
                 <span class="progress-indicator"></span>
               </div>
@@ -205,9 +228,9 @@
               </p>
             </div>
 
-            <div class="notice notice-error" role="alert" x-show="error" x-cloak>
+            <div class="notice notice-error" role="alert" x-show="notice" x-cloak>
               <svg class="notice-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5m0 3.5v.01" /></svg>
-              <p x-text="error"></p>
+              <p x-text="notice"></p>
             </div>
           </div>
         </div>
@@ -217,10 +240,11 @@
         <div class="panel">
           <div class="step-header">
             <h2 id="step-result"><span class="step-index" aria-hidden="true">03</span>Result</h2>
+            <p class="step-meta" x-show="showBatch" x-cloak x-text="`${finished} of ${items.length} done`"></p>
           </div>
 
           <div class="outcome" aria-live="polite">
-            <p class="result-empty" x-show="!result">Your compressed file will appear here.</p>
+            <p class="result-empty" x-show="!result && !showBatch" x-text="isBatch ? 'Your compressed files will appear here.' : 'Your compressed file will appear here.'">Your compressed file will appear here.</p>
 
             <div class="result" x-show="result" x-cloak>
               <template x-if="result">
@@ -260,12 +284,69 @@
                 </div>
               </template>
             </div>
+
+            <div class="batch" x-show="showBatch" x-cloak>
+              <div class="result-body" x-show="done.length" :style="{ '--ratio': sizeRatio(batchSizes) }">
+                <p class="saving">
+                  <span class="saving-value" x-text="savedPercent(batchSizes)"></span>
+                  <span class="saving-label" x-text="done.length === 1 ? 'smaller' : 'smaller in total'"></span>
+                </p>
+
+                <dl class="sizes">
+                  <div class="size">
+                    <dt>Original</dt>
+                    <dd x-text="formatBytes(batchSizes.originalSize)"></dd>
+                    <span class="size-bar" aria-hidden="true"><span></span></span>
+                  </div>
+                  <div class="size size-output">
+                    <dt>Compressed</dt>
+                    <dd x-text="formatBytes(batchSizes.outputSize)"></dd>
+                    <span class="size-bar" aria-hidden="true"><span></span></span>
+                  </div>
+                </dl>
+              </div>
+
+              <ul class="batch-list">
+                <template x-for="item in items" :key="item.id">
+                  <li class="batch-item" :class="{ 'is-failed': item.status === 'failed' }">
+                    <span class="batch-details">
+                      <strong x-text="item.result?.filename ?? item.file.name"></strong>
+                      <small x-text="itemStatus(item)"></small>
+                    </span>
+                    <span class="batch-saving" x-show="item.result?.reduced" x-text="item.result && `−${savedPercent(item.result)}`"></span>
+                    <span class="spinner" x-show="item.status === 'working'" aria-hidden="true"></span>
+                    <template x-if="item.result">
+                      <a
+                        class="icon-button"
+                        :href="item.result.url"
+                        :download="item.result.filename"
+                        :aria-label="`Download ${item.result.filename}`"
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0-5-5m5 5 5-5" /><path d="M5 20h14" /></svg>
+                      </a>
+                    </template>
+                  </li>
+                </template>
+              </ul>
+            </div>
           </div>
 
           <a class="button" x-ref="download" x-show="result" x-cloak :href="result?.url" :download="result?.filename">
             <span x-text="result && `Download ${kindLabel(result.kind)}`">Download</span>
             <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v14m0 0-5.5-5.5M12 18l5.5-5.5" /><path d="M5 21h14" /></svg>
           </a>
+          <button
+            type="button"
+            class="button"
+            x-ref="downloadAll"
+            x-show="showBatch && !busy && done.length > 1"
+            x-cloak
+            :disabled="zipping"
+            @click="downloadAll"
+          >
+            <span x-text="zipping ? 'Preparing ZIP…' : `Download all ${done.length} as ZIP`">Download all</span>
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v14m0 0-5.5-5.5M12 18l5.5-5.5" /><path d="M5 21h14" /></svg>
+          </button>
         </div>
       </section>
     </form>

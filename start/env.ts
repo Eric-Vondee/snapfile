@@ -21,4 +21,7 @@ export default await Env.create(new URL('../', import.meta.url), {
   // PDF tools (optional, default to "qpdf" and "gs" on the PATH)
   QPDF_BIN: Env.schema.string.optional(),
   GS_BIN: Env.schema.string.optional(),
+
+  // Files compressed at the same time (optional, defaults to the CPU count)
+  COMPRESSION_CONCURRENCY: Env.schema.number.optional(),
 })

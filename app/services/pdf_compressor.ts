@@ -53,18 +53,23 @@ export async function compressPdf(
   if (!(await hasPdfHeader(inputPath))) {
     throw new CompressionRejectedError('This file is not a PDF.')
   }
-  await assertNotEncrypted(workDir, input)
-  await assertReadable(workDir, input)
-  const pageCount = await countPages(workDir, input)
+  const timer = stepTimer()
+  const pageCount = await timer.time('inputChecks', async () => {
+    await assertNotEncrypted(workDir, input)
+    await assertReadable(workDir, input)
+    return countPages(workDir, input)
+  })
 
   let source = input
   let pagesResized = 0
   if (mode !== 'lossless') {
-    pagesResized = await fitOversizedPages(inputPath, join(workDir, 'fitted.pdf'))
+    pagesResized = await timer.time('fitPages', () =>
+      fitOversizedPages(inputPath, join(workDir, 'fitted.pdf'))
+    )
     if (pagesResized > 0) source = 'fitted.pdf'
   }
 
-  await runCompression(workDir, mode, source, output)
+  await runCompression(workDir, mode, source, output, timer)
 
   const candidate = await stat(outputPath).catch(() => null)
   if (!candidate || candidate.size === 0) {
@@ -81,18 +86,21 @@ export async function compressPdf(
       reduced: false,
       pageCount,
       pagesResized: 0,
+      steps: timer.steps,
     }
   }
 
   // Stricter than the input check: an output with any qpdf warning is
   // never returned, since viewers like Acrobat may refuse to show it
-  if (!(await isCleanPdf(workDir, output))) {
-    throw new Error(`${mode} compression produced an invalid PDF`)
-  }
-  const outputPageCount = await countPages(workDir, output)
-  if (outputPageCount !== pageCount) {
-    throw new Error(`${mode} compression changed page count ${pageCount} -> ${outputPageCount}`)
-  }
+  await timer.time('outputChecks', async () => {
+    if (!(await isCleanPdf(workDir, output))) {
+      throw new Error(`${mode} compression produced an invalid PDF`)
+    }
+    const outputPageCount = await countPages(workDir, output)
+    if (outputPageCount !== pageCount) {
+      throw new Error(`${mode} compression changed page count ${pageCount} -> ${outputPageCount}`)
+    }
+  })
 
   return {
     outputPath,
@@ -101,6 +109,28 @@ export async function compressPdf(
     reduced: true,
     pageCount,
     pagesResized,
+    steps: timer.steps,
+  }
+}
+
+type StepTimer = ReturnType<typeof stepTimer>
+
+/**
+ * Records how many milliseconds each step takes. The log line for every
+ * compression includes them, so a slow file can be traced to its step.
+ */
+function stepTimer() {
+  const steps: Record<string, number> = {}
+  return {
+    steps,
+    async time<T>(step: string, work: () => Promise<T>): Promise<T> {
+      const startedAt = performance.now()
+      try {
+        return await work()
+      } finally {
+        steps[step] = Math.round(performance.now() - startedAt)
+      }
+    },
   }
 }
 
@@ -251,15 +281,23 @@ async function countPages(cwd: string, file: string) {
   return pages
 }
 
-async function runCompression(cwd: string, mode: CompressionMode, input: string, output: string) {
+async function runCompression(
+  cwd: string,
+  mode: CompressionMode,
+  input: string,
+  output: string,
+  timer: StepTimer
+) {
   if (mode === 'lossless') {
-    const result = await qpdf(cwd, [
-      '--object-streams=generate',
-      '--recompress-flate',
-      '--compression-level=9',
-      input,
-      output,
-    ])
+    const result = await timer.time('rewrite', () =>
+      qpdf(cwd, [
+        '--object-streams=generate',
+        '--recompress-flate',
+        '--compression-level=9',
+        input,
+        output,
+      ])
+    )
     if (result.code === QPDF_ERROR) {
       throw new CompressionRejectedError('qpdf could not rewrite this PDF.')
     }
@@ -267,26 +305,28 @@ async function runCompression(cwd: string, mode: CompressionMode, input: string,
   }
 
   const { preset, dpi } = GHOSTSCRIPT_SETTINGS[mode]
-  const result = await run(
-    binaries.gs,
-    [
-      '-sDEVICE=pdfwrite',
-      '-dSAFER',
-      '-dNOPAUSE',
-      '-dBATCH',
-      '-dQUIET',
-      `-dPDFSETTINGS=${preset}`,
-      `-dColorImageResolution=${dpi}`,
-      `-dGrayImageResolution=${dpi}`,
-      // Presets only downsample images above 1.5x their target dpi (225 dpi
-      // for /ebook); reduce everything above the target instead
-      '-dColorImageDownsampleThreshold=1.0',
-      '-dGrayImageDownsampleThreshold=1.0',
-      '-dMonoImageDownsampleThreshold=1.0',
-      '-sOutputFile=ghostscript.pdf',
-      input,
-    ],
-    { cwd, timeoutMs: TOOL_TIMEOUT_MS }
+  const result = await timer.time('ghostscript', () =>
+    run(
+      binaries.gs,
+      [
+        '-sDEVICE=pdfwrite',
+        '-dSAFER',
+        '-dNOPAUSE',
+        '-dBATCH',
+        '-dQUIET',
+        `-dPDFSETTINGS=${preset}`,
+        `-dColorImageResolution=${dpi}`,
+        `-dGrayImageResolution=${dpi}`,
+        // Presets only downsample images above 1.5x their target dpi (225 dpi
+        // for /ebook); reduce everything above the target instead
+        '-dColorImageDownsampleThreshold=1.0',
+        '-dGrayImageDownsampleThreshold=1.0',
+        '-dMonoImageDownsampleThreshold=1.0',
+        '-sOutputFile=ghostscript.pdf',
+        input,
+      ],
+      { cwd, timeoutMs: TOOL_TIMEOUT_MS }
+    )
   )
   if (result.code !== 0) {
     throw new CompressionRejectedError(
@@ -298,16 +338,13 @@ async function runCompression(cwd: string, mode: CompressionMode, input: string,
   // Rewriting it with qpdf repairs broken references and packs objects
   // into object streams; the soft-mask pass then restores what qpdf had
   // to drop.
-  const cleanup = await qpdf(cwd, [
-    '--object-streams=generate',
-    '--compression-level=9',
-    'ghostscript.pdf',
-    output,
-  ])
+  const cleanup = await timer.time('rewrite', () =>
+    qpdf(cwd, ['--object-streams=generate', '--compression-level=9', 'ghostscript.pdf', output])
+  )
   if (cleanup.code === QPDF_ERROR) {
     throw new Error(`qpdf could not rewrite Ghostscript output: ${cleanup.stderr}`)
   }
-  await restoreSoftMaskGroups(join(cwd, output))
+  await timer.time('softMasks', () => restoreSoftMaskGroups(join(cwd, output)))
 }
 
 function qpdf(cwd: string, args: string[]) {
