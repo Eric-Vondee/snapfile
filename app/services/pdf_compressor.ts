@@ -66,17 +66,13 @@ export async function compressPdf(
 
   await runCompression(workDir, mode, source, output)
 
-  // Stricter than the input check: an output with any qpdf warning is
-  // never returned, since viewers like Acrobat may refuse to show it
   const candidate = await stat(outputPath).catch(() => null)
-  if (!candidate || candidate.size === 0 || !(await isCleanPdf(workDir, output))) {
+  if (!candidate || candidate.size === 0) {
     throw new Error(`${mode} compression produced an invalid PDF`)
   }
-  const outputPageCount = await countPages(workDir, output)
-  if (outputPageCount !== pageCount) {
-    throw new Error(`${mode} compression changed page count ${pageCount} -> ${outputPageCount}`)
-  }
 
+  // A candidate that is not smaller is thrown away, so it is not worth
+  // the full check, which takes seconds on a large file
   if (candidate.size >= originalSize) {
     return {
       outputPath: inputPath,
@@ -87,6 +83,17 @@ export async function compressPdf(
       pagesResized: 0,
     }
   }
+
+  // Stricter than the input check: an output with any qpdf warning is
+  // never returned, since viewers like Acrobat may refuse to show it
+  if (!(await isCleanPdf(workDir, output))) {
+    throw new Error(`${mode} compression produced an invalid PDF`)
+  }
+  const outputPageCount = await countPages(workDir, output)
+  if (outputPageCount !== pageCount) {
+    throw new Error(`${mode} compression changed page count ${pageCount} -> ${outputPageCount}`)
+  }
+
   return {
     outputPath,
     originalSize,
@@ -202,11 +209,22 @@ async function assertReadable(cwd: string, file: string) {
   }
 }
 
+/**
+ * Reads every object into a throwaway copy with stream data untouched.
+ * That rejects broken cross-reference tables and unreadable objects in
+ * milliseconds, where `qpdf --check` also decodes every image and takes
+ * seconds on a large scan. Damage inside a stream still fails safely
+ * later, when Ghostscript or qpdf rewrites the file.
+ */
 async function isValidPdf(cwd: string, file: string) {
-  const result = await qpdf(cwd, ['--check', file])
+  const result = await qpdf(cwd, ['--stream-data=preserve', file, 'readable.pdf'])
   return result.code !== null && result.code !== QPDF_ERROR
 }
 
+/**
+ * The generated file gets the full check: any warning means a viewer
+ * such as Acrobat may refuse it.
+ */
 async function isCleanPdf(cwd: string, file: string) {
   const result = await qpdf(cwd, ['--check', file])
   return result.code === 0

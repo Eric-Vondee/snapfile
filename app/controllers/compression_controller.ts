@@ -56,6 +56,11 @@ export default class CompressionController {
 	 */
 	async store({ request, response, logger }: HttpContext) {
 		const workDir = await mkdtemp(join(tmpdir(), "compress-pdf-"));
+		// Where the time goes, in milliseconds: receiving the upload,
+		// compressing, and recording usage stats
+		const startedAt = performance.now();
+		const timings = { uploadMs: 0, processMs: 0, statsMs: 0 };
+		const since = (from: number) => Math.round(performance.now() - from);
 
 		try {
 			request.multipart.onFile(
@@ -70,6 +75,7 @@ export default class CompressionController {
 				},
 			);
 			await request.multipart.process();
+			timings.uploadMs = since(startedAt);
 
 			const mode = request.input("mode") as CompressionMode;
 			if (!MODES.includes(mode)) {
@@ -89,14 +95,11 @@ export default class CompressionController {
 						);
 			}
 
+			const processStartedAt = performance.now();
 			const kind = await detectKind(join(workDir, INPUT_FILE));
 			const result = await compress(workDir, kind, mode);
 			const body = await readFile(result.outputPath);
-
-			logger.info(
-				{ kind, mode, ...result, outputPath: undefined },
-				"compressed file",
-			);
+			timings.processMs = since(processStartedAt);
 
 			response
 				.header("Content-Type", FILE_KINDS[kind].contentType)
@@ -122,6 +125,7 @@ export default class CompressionController {
 
 			// Only files that were made smaller count, and stats never stand
 			// in the way of a download
+			const statsStartedAt = performance.now();
 			if (result.reduced) {
 				try {
 					await recordCompression({
@@ -139,6 +143,12 @@ export default class CompressionController {
 					logger.warn({ err: error }, "could not record usage");
 				}
 			}
+			timings.statsMs = since(statsStartedAt);
+
+			logger.info(
+				{ kind, mode, ...result, outputPath: undefined, ...timings },
+				"compressed file",
+			);
 
 			return response.send(body);
 		} catch (error) {
