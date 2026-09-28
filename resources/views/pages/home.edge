@@ -63,7 +63,19 @@
       </a>
     </section>
 
-    @if(!tools.qpdf || !tools.gs)
+    @if((!tools.qpdf || !tools.gs) && !showSetupHelp)
+      <div class="notice notice-error" role="alert">
+        <h2>PDF compression is limited right now</h2>
+        <p>
+          @if(!tools.qpdf)
+            PDFs cannot be compressed at the moment.
+          @else
+            PDFs can only use Lossless mode at the moment.
+          @end
+          Images, Word and PowerPoint files work as usual.
+        </p>
+      </div>
+    @elseif(!tools.qpdf || !tools.gs)
       <div class="notice notice-error" role="alert">
         <h2>Missing PDF tools</h2>
         <p>

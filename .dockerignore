@@ -1,0 +1,9 @@
+node_modules
+build
+tmp
+public/assets
+.env
+.env.*
+!.env.example
+.git
+.DS_Store
