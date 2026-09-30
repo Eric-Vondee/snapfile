@@ -58,9 +58,6 @@
       <a class="usage" href="{{ urlFor('stats') }}" x-show="totals.files > 0" x-cloak>
         <strong x-text="formatCount(totals.files)"></strong>
         <span x-text="totals.files === 1 ? 'file compressed' : 'files compressed'"></span>
-        <template x-if="totals.people > 0">
-          <span>by <strong x-text="formatCount(totals.people)"></strong> <span x-text="totals.people === 1 ? 'person' : 'people'"></span></span>
-        </template>
       </a>
     </section>
 
